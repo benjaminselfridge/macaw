@@ -2,6 +2,7 @@ packages: macaw-ppc/
           macaw-arm/
           macaw-semmc/
           macaw-ppc-symbolic/
+          macaw-rv64g/
           base/
           x86/
           symbolic/
@@ -18,6 +19,10 @@ packages: macaw-ppc/
           submodules/dismantle/dismantle-ppc/
           submodules/dismantle/dismantle-arm/
           submodules/dismantle/dismantle-thumb/
+          submodules/grift/grift
+          deps/bv-sized
+          deps/bv-sized-float
+          deps/softfloat-hs
           deps/parameterized-utils/
           deps/crucible/crucible/
           deps/crucible/crucible-llvm/
