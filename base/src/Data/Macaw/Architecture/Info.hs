@@ -6,7 +6,9 @@ This defines the architecture-specific information needed for code discovery.
 -}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternGuards #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 module Data.Macaw.Architecture.Info
   ( ArchitectureInfo(..)
