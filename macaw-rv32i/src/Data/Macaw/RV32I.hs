@@ -13,6 +13,7 @@ module Data.Macaw.RV32I
   , RV32I
   ) where
 
+import Control.Lens ((.~), (&))
 import Data.BitVector.Sized as BV
 import Data.Macaw.AbsDomain.AbsState as MA
 import Data.Macaw.Architecture.Info as MI
@@ -25,6 +26,7 @@ import GHC.TypeLits
 import qualified GRIFT.Types as G
 
 import Data.Macaw.RV32I.Arch
+import Data.Macaw.RV32I.Disassemble
 import Data.Macaw.RV32I.RV32IReg
 
 rv32i_linux_info :: MI.ArchitectureInfo RV32I
@@ -47,9 +49,3 @@ rv32i_linux_info =
                       , MI.archDemandContext = undefined
                       , MI.postArchTermStmtAbsState = undefined
                       }
-
-initialBlockRegs :: forall ids .
-                    ArchSegmentOff RV32I
-                 -> MA.AbsBlockState (ArchReg RV32I)
-                 -> Either String (RegState (ArchReg RV32I) (Value RV32I ids))
-initialBlockRegs _ _ = undefined
