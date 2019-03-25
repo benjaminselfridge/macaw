@@ -9,11 +9,11 @@ module Data.Macaw.RV32I.Disassemble
   ( initialBlockRegs
   ) where
 
-import Control.Lens ((.~), (&))
+import Control.Lens ((.~), (&), (^.))
 import Control.Monad.Except
 import Control.Monad.RWS
 import Control.Monad.ST
-import qualified Data.BitVector.Sized as BV
+-- import qualified Data.BitVector.Sized as BV
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import Data.Macaw.CFG hiding ( BVValue )
 import qualified Data.Macaw.CFG as MC
@@ -41,7 +41,7 @@ initRegState startPC =
   mkRegState Initial & curIP .~ RelocatableValue (addrWidthRepr startPC) (MM.segoffAddr startPC)
 
 data ITransEnv fmt s ids = ITransEnv { iTransNonceGenerator :: NonceGenerator (ST s) ids
-                                     , iTransOperandMap :: MapF.MapF (G.OperandID fmt) (BVValue ids)
+                                     , iTransOperandMap :: MapF.MapF (G.OperandID fmt) G.BitVector
                                      , iTransInstBytes :: Value RV32I ids (MT.BVType 32)
                                      , iTransInstWord :: Value RV32I ids (MT.BVType 32)
                                    }
@@ -84,7 +84,7 @@ liftST sta = ITransM $ lift $ lift sta
 getNonceGenerator :: ITransM fmt s ids (NonceGenerator (ST s) ids)
 getNonceGenerator = iTransNonceGenerator <$> ask
 
-getOperandMap :: ITransM fmt s ids (MapF.MapF (G.OperandID fmt) (BVValue ids))
+getOperandMap :: ITransM fmt s ids (MapF.MapF (G.OperandID fmt) G.BitVector)
 getOperandMap = iTransOperandMap <$> ask
 
 getInstBytes :: ITransM fmt s ids (Value RV32I ids (MT.BVType 32))
@@ -94,12 +94,23 @@ getInstWord :: ITransM fmt s ids (Value RV32I ids (MT.BVType 32))
 getInstWord = iTransInstBytes <$> ask
 
 getOperandValue :: G.OperandID fmt w
-           -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
+                -> ITransM fmt s ids (G.BitVector w)
 getOperandValue oid = do
   operandMap <- getOperandMap
   case MapF.lookup oid operandMap of
     Nothing -> throwError $ OperandLookupError (Some oid)
-    Just (BVValue v) -> return v
+    Just bv -> return bv
+
+getRegState :: ITransM fmt s ids (RegState (ArchReg RV32I) (Value RV32I ids))
+getRegState = iTransRegState <$> get
+
+getRegValue :: ArchReg RV32I tp -> ITransM fmt s ids (Value RV32I ids tp)
+getRegValue gpr = do
+  regState <- getRegState
+  return (regState ^. boundValue gpr)
+
+addStmt :: Stmt RV32I ids -> ITransM fmt s ids ()
+addStmt stmt = tell $ Seq.singleton stmt
 
 assign :: AssignRhs RV32I (Value RV32I ids) (MT.BVType w)
        -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
@@ -107,17 +118,28 @@ assign rhs = do
   nonceGen <- getNonceGenerator
   nonce <- liftST $ freshNonce nonceGen
   let assignment = Assignment (AssignId nonce) rhs
-  tell $ Seq.singleton (AssignStmt assignment)
+  addStmt (AssignStmt assignment)
   return assignment
 
 -----------------
 -- TRANSLATION --
 -----------------
 
+withPosNat :: NatRepr w -> ((1 <= w) => a) -> ITransM fmt s ids a
+withPosNat wRepr a = case isZeroOrGT1 wRepr of
+  Left Refl -> throwError ZeroWidthBV
+  Right LeqProof -> return a
+
+withPosNatM :: NatRepr w -> ((1 <= w) => ITransM fmt s ids a) -> ITransM fmt s ids a
+withPosNatM wRepr a = join (withPosNat wRepr a)
+
 transInstExpr :: G.InstExpr fmt G.RV32I w
               -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
-transInstExpr (G.InstLitBV (BV.BitVector wRepr x)) = withPosNat wRepr $ MC.BVValue wRepr x
-transInstExpr (G.OperandExpr _ oid) = getOperandValue oid
+transInstExpr (G.InstLitBV (G.BitVector wRepr x)) = withPosNat wRepr $ MC.BVValue wRepr x
+transInstExpr (G.OperandExpr wRepr oid) = withPosNatM wRepr $ do
+  bv <- getOperandValue oid
+  case bv of
+    G.BitVector _ x -> return $ MC.BVValue wRepr x
 transInstExpr (G.InstBytes _) = getInstBytes
 transInstExpr (G.InstWord _) = getInstWord
 transInstExpr (G.InstStateApp stateApp) = transStateApp stateApp
@@ -129,14 +151,18 @@ transStateApp (G.AppExpr bvApp) = do
   assignment <- transBVApp bvApp
   return $ AssignedValue assignment
 
-transLocApp :: G.LocApp (G.InstExpr fmt rv) rv w
+-- TODO: CSRs, privilege mode
+transLocApp :: G.LocApp (G.InstExpr fmt G.RV32I) G.RV32I w
             -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
-transLocApp = undefined
-
-withPosNat :: NatRepr w -> ((1 <= w) => a) -> ITransM fmt s ids a
-withPosNat wRepr a = case isZeroOrGT1 wRepr of
-  Left Refl -> throwError ZeroWidthBV
-  Right LeqProof -> return a
+transLocApp (G.PCApp _) = getRegValue RV32I_PC
+transLocApp (G.GPRApp _ (G.OperandExpr _ oid)) = do
+  rid <- getOperandValue oid
+  getRegValue (RV32I_GPR rid)
+transLocApp (G.MemApp bytesRepr e) = withPosNatM bytesRepr $ do
+  addr <- transInstExpr e
+  memAssignment <- assign (ReadMem addr (BVMemRepr bytesRepr MM.LittleEndian))
+  return (AssignedValue memAssignment)
+transLocApp _ = undefined
 
 transBVApp :: G.BVApp (G.InstExpr fmt G.RV32I) w
            -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
@@ -181,9 +207,9 @@ bvToMacawApp (G.MulApp wRepr e1 e2) = withPosNat wRepr $ BVMul wRepr (unBVValue 
   -- IteApp :: !(NatRepr w) -> !(expr 1) -> !(expr w) -> !(expr w) -> BVApp expr w
 bvToMacawApp _ = undefined
 
--- transBVApp :: BV.BVApp (BVValue ids) w
+-- transBVApp :: G.BVApp (BVValue ids) w
 --            -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
--- transBVApp (BV.LitBVApp (BV.BitVector wRepr x)) = case isZeroOrGT1 wRepr of
+-- transBVApp (G.LitBVApp (G.BitVector wRepr x)) = case isZeroOrGT1 wRepr of
 --   Left Refl -> throwError ZeroWidthBV
 --   Right LeqProof -> return $ MC.BVValue wRepr x
 -- transBVApp
