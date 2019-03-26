@@ -10,7 +10,7 @@ module Data.Macaw.RV32I.RV32IReg where
 
 import Data.BitVector.Sized as BV
 import Data.Macaw.CFG as MC
-import Data.Macaw.Types ( BVType, HasRepr, TypeRepr(..), n32, typeRepr, Type )
+import Data.Macaw.Types ( BVType, HasRepr, TypeRepr(..), n32, typeRepr )
 import Data.Parameterized
 import Data.Parameterized.TH.GADT as TH
 

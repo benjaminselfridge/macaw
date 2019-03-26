@@ -7,7 +7,7 @@
 module Data.Macaw.RV32I.Arch where
 
 import Data.Macaw.CFG as MC
-import Data.Macaw.Types ( BVType, HasRepr, TypeRepr(..), n32, typeRepr, Type )
+import Data.Macaw.Types ( BVType, Type )
 import Data.Parameterized
 
 data RV32I

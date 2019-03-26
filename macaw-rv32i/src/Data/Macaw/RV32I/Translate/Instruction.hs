@@ -6,23 +6,22 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Data.Macaw.RV32I.Disassemble
-  ( initialBlockRegs
+module Data.Macaw.RV32I.Translate.Instruction
+  ( stmtsForInstruction
+  , ITransState(..)
+  , ITransResult(..)
   ) where
 
-import Control.Lens ((.~), (&), (^.), (.=))
+import Control.Lens ((.~), (&), (^.))
 import Control.Monad.Except
 import Control.Monad.RWS
 import Control.Monad.ST
-import qualified Data.ByteString as BS
-import qualified Data.Macaw.AbsDomain.AbsState as MA
 import Data.Macaw.CFG hiding ( BVValue )
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Types as MT
 import Data.Parameterized
 import qualified Data.Parameterized.List as PL
-import qualified Data.Parameterized.Map as PM
 import Data.Parameterized.Nonce
 import qualified GHC.TypeLits as T
 import qualified Data.Sequence as Seq
@@ -34,32 +33,6 @@ import qualified GRIFT.Types as G
 
 import Data.Macaw.RV32I.Arch
 import Data.Macaw.RV32I.RV32IReg
-
-initialBlockRegs :: forall ids .
-                    ArchSegmentOff RV32I
-                 -> MA.AbsBlockState (ArchReg RV32I)
-                 -> Either String (RegState (ArchReg RV32I) (Value RV32I ids))
-initialBlockRegs blkAddr _abState = pure $ initRegState blkAddr
-
-initRegState :: MM.MemSegmentOff (RegAddrWidth (ArchReg RV32I))
-             -> RegState (ArchReg RV32I) (Value RV32I ids)
-initRegState startPC =
-  mkRegState Initial & curIP .~ RelocatableValue (addrWidthRepr startPC) (MM.segoffAddr startPC)
-
-readInstruction :: MM.MemWidth w
-                => MM.MemSegmentOff w
-                -> Either (MM.MemoryError w) (Some (G.Instruction G.RV32I))
-readInstruction addr = do
-  contents <- MM.segoffContentsAfter addr
-  case contents of
-    [] -> throwError (MM.AccessViolation (MM.segoffAddr addr))
-    MM.RelocationRegion r : _ -> throwError (MM.UnexpectedRelocation (MM.segoffAddr addr) r)
-    MM.ByteRegion bs : _rest
-      | BS.null bs -> throwError (MM.AccessViolation (MM.segoffAddr addr))
-      | otherwise -> case G.bitVector <$> (BS.unpack $ BS.take 4 bs) of
-          ([bv0, bv1, bv2, bv3] :: [G.BitVector 8]) -> do
-            let bv = bv3 G.<:> bv2 G.<:> bv1 G.<:> bv0
-            return $ G.decode (G.knownISet :: G.InstructionSet G.RV32I) bv
 
 data ITransResult fmt ids = ITransError (ITransError fmt) (ITransState ids)
                           | ITransSuccess (Seq.Seq (Stmt RV32I ids)) (ITransState ids)
@@ -96,9 +69,14 @@ data ITransState ids = ITransState { iTransCurrentRegState :: RegState (ArchReg 
 
 newtype BVValue ids w = BVValue { unBVValue :: Value RV32I ids (MT.BVType w) }
 
-data ITransError fmt = OperandLookupError (Some (G.OperandID fmt))
-                     | ZeroWidthBV
+data ITransError fmt = ZeroWidthBV
                      | UnsupportedLocError (Some (G.LocApp (G.InstExpr fmt G.RV32I) G.RV32I))
+  deriving (Eq)
+
+-- TODO: Fix this
+instance Show (ITransError fmt) where
+  show ZeroWidthBV = "zero-width bitvector"
+  show (UnsupportedLocError _) = "unsupported location"
 
 -- | Monad for translating the semantics of a single instruction in a sequence of
 -- macaw statements.
@@ -209,6 +187,7 @@ withPosNatM wRepr a = join (withPosNat wRepr a)
 withBVValuePosWidth :: ArchConstraints arch => Value arch ids (MT.BVType w) -> ((1 <= w) => a) -> a
 withBVValuePosWidth (MC.BVValue _ _) a = a
 withBVValuePosWidth (MC.RelocatableValue _ _) a = a
+withBVValuePosWidth _ _ = error "withBVValuePosWidth"
 
 -- | Translate the entire instruction. This should be called exactly once.
 transInstruction :: ITransM fmt s ids ()
@@ -230,6 +209,7 @@ transStmt (G.AssignStmt (G.MemApp bytesRepr addrE) e) = do
   val <- transInstExpr e
   writeMem addr bytesRepr val
 transStmt (G.AssignStmt locApp _) = throwError $ UnsupportedLocError (Some locApp)
+transStmt _ = throwError $ undefined
 
 -- | Given an 'InstExpr', translate it to a macaw 'Value' by traversing the
 -- expression, building up a list of statements along the way.
@@ -267,8 +247,8 @@ transLocApp locApp = throwError $ UnsupportedLocError (Some locApp)
 transBVApp :: G.BVApp (G.InstExpr fmt G.RV32I) w
            -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
 transBVApp bvApp = do
-  bvApp <- traverseFC (return . BVValue <=< transInstExpr) bvApp
-  macawApp <- bvToMacawRhs bvApp
+  bvApp' <- traverseFC (return . BVValue <=< transInstExpr) bvApp
+  macawApp <- bvToMacawRhs bvApp'
   assign macawApp
 
 bvToMacawRhs :: forall fmt s ids w . G.BVApp (BVValue ids) w

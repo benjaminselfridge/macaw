@@ -13,21 +13,11 @@ module Data.Macaw.RV32I
   , RV32I
   ) where
 
-import Control.Lens ((.~), (&))
-import Data.BitVector.Sized as BV
-import Data.Macaw.AbsDomain.AbsState as MA
 import Data.Macaw.Architecture.Info as MI
-import Data.Macaw.CFG as MC
 import Data.Macaw.Memory as MM
-import Data.Macaw.Types ( BVType, HasRepr, TypeRepr(..), n32, typeRepr, Type )
-import Data.Parameterized
-import qualified Data.Parameterized.TH.GADT as TH
-import GHC.TypeLits
-import qualified GRIFT.Types as G
 
 import Data.Macaw.RV32I.Arch
-import Data.Macaw.RV32I.Disassemble
-import Data.Macaw.RV32I.RV32IReg
+import Data.Macaw.RV32I.Translate
 
 rv32i_linux_info :: MI.ArchitectureInfo RV32I
 rv32i_linux_info =
@@ -35,7 +25,7 @@ rv32i_linux_info =
                       , MI.archAddrWidth = MM.Addr32
                       , MI.archEndianness = MM.LittleEndian
                       , MI.mkInitialRegsForBlock = initialBlockRegs
-                      , MI.disassembleFn = undefined
+                      , MI.disassembleFn = translateBlock
                       , MI.mkInitialAbsState = undefined
                       , MI.absEvalArchFn = undefined
                       , MI.absEvalArchStmt = undefined
