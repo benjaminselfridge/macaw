@@ -10,7 +10,7 @@ module Data.Macaw.RV32I.Disassemble
   ( initialBlockRegs
   ) where
 
-import Control.Lens ((.~), (&), (^.))
+import Control.Lens ((.~), (&), (^.), (.=))
 import Control.Monad.Except
 import Control.Monad.RWS
 import Control.Monad.ST
@@ -21,8 +21,10 @@ import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.Memory as MM
 import qualified Data.Macaw.Types as MT
 import Data.Parameterized
+import qualified Data.Parameterized.List as PL
+import qualified Data.Parameterized.Map as PM
 import Data.Parameterized.Nonce
-import qualified Data.Parameterized.Map as MapF
+import qualified GHC.TypeLits as T
 import qualified Data.Sequence as Seq
 import qualified GRIFT.Decode as G
 import qualified GRIFT.InstructionSet as G
@@ -59,22 +61,47 @@ readInstruction addr = do
             let bv = bv3 G.<:> bv2 G.<:> bv1 G.<:> bv0
             return $ G.decode (G.knownISet :: G.InstructionSet G.RV32I) bv
 
-data ITransEnv fmt s ids = ITransEnv { iTransNonceGenerator :: NonceGenerator (ST s) ids
-                                     , iTransOperandMap :: MapF.MapF (G.OperandID fmt) G.BitVector
-                                     , iTransInstBytes :: Value RV32I ids (MT.BVType 32)
-                                     , iTransInstWord :: Value RV32I ids (MT.BVType 32)
-                                   }
+data ITransResult fmt ids = ITransError (ITransError fmt) (ITransState ids)
+                          | ITransSuccess (Seq.Seq (Stmt RV32I ids)) (ITransState ids)
 
-data ITransState ids = ITransState { iTransStmts :: Seq.Seq (Stmt RV32I ids)
-                                   , iTransRegState :: RegState (ArchReg RV32I) (Value RV32I ids)
+-- | Translate an instruction into a list of macaw statements.
+stmtsForInstruction :: NonceGenerator (ST s) ids
+                    -> G.Instruction G.RV32I fmt
+                    -> RegState (ArchReg RV32I) (Value RV32I ids)
+                    -> ST s (ITransResult fmt ids)
+stmtsForInstruction ng inst rs = do
+  (e, st, stmts) <- runITransM (ITransEnv ng inst rs) (ITransState rs) transInstruction
+  case e of
+    Left err -> return $ ITransError err st
+    Right () -> return $ ITransSuccess stmts st
+
+-- | Environment for instruction translation.
+data ITransEnv fmt s ids = ITransEnv { iTransNonceGenerator :: NonceGenerator (ST s) ids
+                                       -- ^ A nonce generator for generating 'AssignId's.
+                                     , iTransInstruction :: G.Instruction G.RV32I fmt
+                                       -- ^ The instruction we are translating.
+                                     , iTransInitialRegState :: RegState (ArchReg RV32I) (Value RV32I ids)
+                                       -- ^ Initial state of the registers at the
+                                       -- beginning of instruction execution. This is
+                                       -- the only register state we should read from.
+                                     }
+
+-- | State for instruction translation.
+data ITransState ids = ITransState { iTransCurrentRegState :: RegState (ArchReg RV32I) (Value RV32I ids)
+                                     -- ^ Tracks the changing state of the registers
+                                     -- as we execute the instruction. This should
+                                     -- never be read from, so we might want to put
+                                     -- it in the Writer monad at some point.
                                    }
 
 newtype BVValue ids w = BVValue { unBVValue :: Value RV32I ids (MT.BVType w) }
 
 data ITransError fmt = OperandLookupError (Some (G.OperandID fmt))
                      | ZeroWidthBV
+                     | UnsupportedLocError (Some (G.LocApp (G.InstExpr fmt G.RV32I) G.RV32I))
 
--- | Monad for translating instruction semantics into macaw statements.
+-- | Monad for translating the semantics of a single instruction in a sequence of
+-- macaw statements.
 newtype ITransM fmt s ids a = ITransM
   { unITransM :: ExceptT (ITransError fmt)
                  ( RWST
@@ -93,6 +120,13 @@ newtype ITransM fmt s ids a = ITransM
            , MonadError (ITransError fmt)
            )
 
+-- | Execute an 'ITransM' action.
+runITransM :: ITransEnv fmt s ids
+           -> ITransState ids
+           -> ITransM fmt s ids a
+           -> ST s (Either (ITransError fmt) a, ITransState ids, Seq.Seq (Stmt RV32I ids))
+runITransM env st action = runRWST (runExceptT (unITransM action)) env st
+
 liftST :: ST s a -> ITransM fmt s ids a
 liftST sta = ITransM $ lift $ lift sta
 
@@ -103,36 +137,42 @@ liftST sta = ITransM $ lift $ lift sta
 getNonceGenerator :: ITransM fmt s ids (NonceGenerator (ST s) ids)
 getNonceGenerator = iTransNonceGenerator <$> ask
 
-getOperandMap :: ITransM fmt s ids (MapF.MapF (G.OperandID fmt) G.BitVector)
-getOperandMap = iTransOperandMap <$> ask
-
-getInstBytes :: ITransM fmt s ids (Value RV32I ids (MT.BVType 32))
-getInstBytes = iTransInstBytes <$> ask
+getInstruction ::ITransM fmt s ids (G.Instruction G.RV32I fmt)
+getInstruction = iTransInstruction <$> ask
 
 getInstWord :: ITransM fmt s ids (Value RV32I ids (MT.BVType 32))
-getInstWord = iTransInstBytes <$> ask
+getInstWord = do
+  inst <- getInstruction
+  let (G.BitVector _ x) = G.encode G.knownISet inst
+  return $ MC.BVValue knownRepr x
 
-getOperandValue :: G.OperandID fmt w
-                -> ITransM fmt s ids (G.BitVector w)
+getOperandValue :: G.OperandID fmt w -> ITransM fmt s ids (G.BitVector w)
 getOperandValue oid = do
-  operandMap <- getOperandMap
-  case MapF.lookup oid operandMap of
-    Nothing -> throwError $ OperandLookupError (Some oid)
-    Just bv -> return bv
+  G.Inst _ (G.Operands _ operandList) <- getInstruction
+  return $ operandList PL.!! G.unOperandID oid
 
-getRegState :: ITransM fmt s ids (RegState (ArchReg RV32I) (Value RV32I ids))
-getRegState = iTransRegState <$> get
+getInitialRegState :: ITransM fmt s ids (RegState (ArchReg RV32I) (Value RV32I ids))
+getInitialRegState = iTransInitialRegState <$> ask
 
-getRegValue :: ArchReg RV32I tp -> ITransM fmt s ids (Value RV32I ids tp)
-getRegValue gpr = do
-  regState <- getRegState
+getInitialRegValue :: ArchReg RV32I tp -> ITransM fmt s ids (Value RV32I ids tp)
+getInitialRegValue gpr = do
+  regState <- getInitialRegState
   return (regState ^. boundValue gpr)
+
+setCurPC :: Value RV32I ids (MT.BVType 32) -> ITransM fmt s ids ()
+setCurPC pcVal = do
+  currentRegState <- iTransCurrentRegState <$> get
+  put $ ITransState (currentRegState & curIP .~ pcVal)
+
+setCurGPR :: G.BitVector 5 -> Value RV32I ids (MT.BVType 32) -> ITransM fmt s ids ()
+setCurGPR rid regVal = do
+  currentRegState <- iTransCurrentRegState <$> get
+  put $ ITransState (currentRegState & boundValue (RV32I_GPR rid) .~ regVal)
 
 addStmt :: Stmt RV32I ids -> ITransM fmt s ids ()
 addStmt stmt = tell $ Seq.singleton stmt
 
-assign :: AssignRhs RV32I (Value RV32I ids) tp
-       -> ITransM fmt s ids (Assignment RV32I ids tp)
+assign :: AssignRhs RV32I (Value RV32I ids) tp -> ITransM fmt s ids (Assignment RV32I ids tp)
 assign rhs = do
   nonceGen <- getNonceGenerator
   nonce <- liftST $ freshNonce nonceGen
@@ -140,22 +180,59 @@ assign rhs = do
   addStmt (AssignStmt assignment)
   return assignment
 
+writeMem :: Value RV32I ids (MT.BVType 32)
+         -> NatRepr bytes
+         -> Value RV32I ids (MT.BVType (8 T.* bytes))
+         -> ITransM fmt s ids ()
+writeMem addr bytesRepr val = withPosNatM bytesRepr $
+  addStmt $ WriteMem addr (BVMemRepr bytesRepr LittleEndian) val
+
 -----------------
 -- TRANSLATION --
 -----------------
 
+-- | Since grift/bv-sized allow zero-width bitvectors in their expression languages,
+-- we use this function to throw an error if we ever encounter a zero-width bitvector
+-- expression.
 withPosNat :: NatRepr w -> ((1 <= w) => a) -> ITransM fmt s ids a
 withPosNat wRepr a = case isZeroOrGT1 wRepr of
   Left Refl -> throwError ZeroWidthBV
   Right LeqProof -> return a
 
+-- | Like 'withPosNat', but takes a monadic action rather than a pure value.
 withPosNatM :: NatRepr w -> ((1 <= w) => ITransM fmt s ids a) -> ITransM fmt s ids a
 withPosNatM wRepr a = join (withPosNat wRepr a)
 
+-- | Every 'Value arch ids (BVType w)' has positive width, so we don't need a
+-- 'NatRepr' to prove it to the compiler. This function case-splits on the two
+-- constructors that produce a bitvector to eliminate that constraint.
 withBVValuePosWidth :: ArchConstraints arch => Value arch ids (MT.BVType w) -> ((1 <= w) => a) -> a
 withBVValuePosWidth (MC.BVValue _ _) a = a
 withBVValuePosWidth (MC.RelocatableValue _ _) a = a
 
+-- | Translate the entire instruction. This should be called exactly once.
+transInstruction :: ITransM fmt s ids ()
+transInstruction = do
+  G.Inst opcode _ <- getInstruction
+  let sem = G.getInstSemantics $ G.semanticsFromOpcode G.knownISet opcode
+      stmts = sem ^. G.semStmts
+  mapM_ transStmt stmts
+
+-- | Given a GRIFT 'G.Stmt', translate it to a macaw 'Stmt'.
+transStmt :: G.Stmt (G.InstExpr fmt G.RV32I) G.RV32I -> ITransM fmt s ids ()
+transStmt (G.AssignStmt (G.PCApp _) e) = transInstExpr e >>= setCurPC
+transStmt (G.AssignStmt (G.GPRApp _ (G.OperandExpr _ oid)) e) = do
+  rid <- getOperandValue oid
+  v <- transInstExpr e
+  setCurGPR rid v
+transStmt (G.AssignStmt (G.MemApp bytesRepr addrE) e) = do
+  addr <- transInstExpr addrE
+  val <- transInstExpr e
+  writeMem addr bytesRepr val
+transStmt (G.AssignStmt locApp _) = throwError $ UnsupportedLocError (Some locApp)
+
+-- | Given an 'InstExpr', translate it to a macaw 'Value' by traversing the
+-- expression, building up a list of statements along the way.
 transInstExpr :: G.InstExpr fmt G.RV32I w
               -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
 transInstExpr (G.InstLitBV (G.BitVector wRepr x)) = withPosNat wRepr $ MC.BVValue wRepr x
@@ -163,7 +240,7 @@ transInstExpr (G.OperandExpr wRepr oid) = withPosNatM wRepr $ do
   bv <- getOperandValue oid
   case bv of
     G.BitVector _ x -> return $ MC.BVValue wRepr x
-transInstExpr (G.InstBytes _) = getInstBytes
+transInstExpr (G.InstBytes _) = return $ MC.BVValue knownRepr 4
 transInstExpr (G.InstWord _) = getInstWord
 transInstExpr (G.InstStateApp stateApp) = transStateApp stateApp
 
@@ -177,15 +254,15 @@ transStateApp (G.AppExpr bvApp) = do
 -- TODO: CSRs, privilege mode
 transLocApp :: G.LocApp (G.InstExpr fmt G.RV32I) G.RV32I w
             -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
-transLocApp (G.PCApp _) = getRegValue RV32I_PC
+transLocApp (G.PCApp _) = getInitialRegValue RV32I_PC
 transLocApp (G.GPRApp _ (G.OperandExpr _ oid)) = do
   rid <- getOperandValue oid
-  getRegValue (RV32I_GPR rid)
+  getInitialRegValue (RV32I_GPR rid)
 transLocApp (G.MemApp bytesRepr e) = withPosNatM bytesRepr $ do
   addr <- transInstExpr e
   memAssignment <- assign (ReadMem addr (BVMemRepr bytesRepr MM.LittleEndian))
   return (AssignedValue memAssignment)
-transLocApp _ = undefined
+transLocApp locApp = throwError $ UnsupportedLocError (Some locApp)
 
 transBVApp :: G.BVApp (G.InstExpr fmt G.RV32I) w
            -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
