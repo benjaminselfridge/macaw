@@ -14,7 +14,7 @@ import Control.Lens ((.~), (&), (^.))
 import Control.Monad.Except
 import Control.Monad.RWS
 import Control.Monad.ST
--- import qualified Data.BitVector.Sized as BV
+import qualified Data.ByteString as BS
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import Data.Macaw.CFG hiding ( BVValue )
 import qualified Data.Macaw.CFG as MC
@@ -24,6 +24,9 @@ import Data.Parameterized
 import Data.Parameterized.Nonce
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Sequence as Seq
+import qualified GRIFT.Decode as G
+import qualified GRIFT.InstructionSet as G
+import qualified GRIFT.InstructionSet.Known as G
 import qualified GRIFT.Semantics as G
 import qualified GRIFT.Types as G
 
@@ -40,6 +43,21 @@ initRegState :: MM.MemSegmentOff (RegAddrWidth (ArchReg RV32I))
              -> RegState (ArchReg RV32I) (Value RV32I ids)
 initRegState startPC =
   mkRegState Initial & curIP .~ RelocatableValue (addrWidthRepr startPC) (MM.segoffAddr startPC)
+
+readInstruction :: MM.MemWidth w
+                => MM.MemSegmentOff w
+                -> Either (MM.MemoryError w) (Some (G.Instruction G.RV32I))
+readInstruction addr = do
+  contents <- MM.segoffContentsAfter addr
+  case contents of
+    [] -> throwError (MM.AccessViolation (MM.segoffAddr addr))
+    MM.RelocationRegion r : _ -> throwError (MM.UnexpectedRelocation (MM.segoffAddr addr) r)
+    MM.ByteRegion bs : _rest
+      | BS.null bs -> throwError (MM.AccessViolation (MM.segoffAddr addr))
+      | otherwise -> case G.bitVector <$> (BS.unpack $ BS.take 4 bs) of
+          ([bv0, bv1, bv2, bv3] :: [G.BitVector 8]) -> do
+            let bv = bv3 G.<:> bv2 G.<:> bv1 G.<:> bv0
+            return $ G.decode (G.knownISet :: G.InstructionSet G.RV32I) bv
 
 data ITransEnv fmt s ids = ITransEnv { iTransNonceGenerator :: NonceGenerator (ST s) ids
                                      , iTransOperandMap :: MapF.MapF (G.OperandID fmt) G.BitVector
@@ -217,10 +235,3 @@ bvToMacawRhs (G.LtsApp e1 e2) = withBVValuePosWidth (unBVValue e1) $ do
   -- Other operations
   -- IteApp :: !(NatRepr w) -> !(expr 1) -> !(expr w) -> !(expr w) -> BVApp expr w
 bvToMacawRhs _ = undefined
-
--- transBVApp :: G.BVApp (BVValue ids) w
---            -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
--- transBVApp (G.LitBVApp (G.BitVector wRepr x)) = case isZeroOrGT1 wRepr of
---   Left Refl -> throwError ZeroWidthBV
---   Right LeqProof -> return $ MC.BVValue wRepr x
--- transBVApp
