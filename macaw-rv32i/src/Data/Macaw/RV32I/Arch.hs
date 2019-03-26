@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Data.Macaw.RV32I.Arch where
 
@@ -10,7 +12,23 @@ import Data.Parameterized
 
 data RV32I
 
-data RV32IPrimFn (f :: Type -> *) (tp :: Type)
+data RV32IPrimFn (f :: Type -> *) (tp :: Type) where
+  QuotU :: (1 <= w) => NatRepr w
+        -> f (BVType w)
+        -> f (BVType w)
+        -> RV32IPrimFn f (BVType w)
+  QuotS :: (1 <= w) => NatRepr w
+        -> f (BVType w)
+        -> f (BVType w)
+        -> RV32IPrimFn f (BVType w)
+  RemU :: (1 <= w) => NatRepr w
+       -> f (BVType w)
+       -> f (BVType w)
+       -> RV32IPrimFn f (BVType w)
+  RemS :: (1 <= w) => NatRepr w
+       -> f (BVType w)
+       -> f (BVType w)
+       -> RV32IPrimFn f (BVType w)
 
 instance MC.IsArchFn RV32IPrimFn where
   ppArchFn _ = undefined

@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
@@ -112,8 +113,8 @@ getRegValue gpr = do
 addStmt :: Stmt RV32I ids -> ITransM fmt s ids ()
 addStmt stmt = tell $ Seq.singleton stmt
 
-assign :: AssignRhs RV32I (Value RV32I ids) (MT.BVType w)
-       -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
+assign :: AssignRhs RV32I (Value RV32I ids) tp
+       -> ITransM fmt s ids (Assignment RV32I ids tp)
 assign rhs = do
   nonceGen <- getNonceGenerator
   nonce <- liftST $ freshNonce nonceGen
@@ -132,6 +133,10 @@ withPosNat wRepr a = case isZeroOrGT1 wRepr of
 
 withPosNatM :: NatRepr w -> ((1 <= w) => ITransM fmt s ids a) -> ITransM fmt s ids a
 withPosNatM wRepr a = join (withPosNat wRepr a)
+
+withBVValuePosWidth :: ArchConstraints arch => Value arch ids (MT.BVType w) -> ((1 <= w) => a) -> a
+withBVValuePosWidth (MC.BVValue _ _) a = a
+withBVValuePosWidth (MC.RelocatableValue _ _) a = a
 
 transInstExpr :: G.InstExpr fmt G.RV32I w
               -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
@@ -168,36 +173,42 @@ transBVApp :: G.BVApp (G.InstExpr fmt G.RV32I) w
            -> ITransM fmt s ids (Assignment RV32I ids (MT.BVType w))
 transBVApp bvApp = do
   bvApp <- traverseFC (return . BVValue <=< transInstExpr) bvApp
-  macawApp <- bvToMacawApp bvApp
-  assign (EvalApp macawApp)
+  macawApp <- bvToMacawRhs bvApp
+  assign macawApp
 
-bvToMacawApp :: forall fmt s ids w . G.BVApp (BVValue ids) w
-             -> ITransM fmt s ids (App (Value RV32I ids) (MT.BVType w))
-bvToMacawApp (G.AndApp wRepr e1 e2) = withPosNat wRepr $ BVAnd wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.OrApp wRepr e1 e2) = withPosNat wRepr $ BVOr wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.XorApp wRepr e1 e2) = withPosNat wRepr $ BVXor wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.NotApp wRepr e) = withPosNat wRepr $ BVComplement wRepr (unBVValue e)
-bvToMacawApp (G.SllApp wRepr e1 e2) = withPosNat wRepr $ BVShl wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.SrlApp wRepr e1 e2) = withPosNat wRepr $ BVShr wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.SraApp wRepr e1 e2) = withPosNat wRepr $ BVSar wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.AddApp wRepr e1 e2) = withPosNat wRepr $ BVAdd wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.SubApp wRepr e1 e2) = withPosNat wRepr $ BVSub wRepr (unBVValue e1) (unBVValue e2)
-bvToMacawApp (G.MulApp wRepr e1 e2) = withPosNat wRepr $ BVMul wRepr (unBVValue e1) (unBVValue e2)
--- TODO: Handle these with architecture specific functions
-  -- QuotUApp :: !(NatRepr w) -> !(expr w) -> !(expr w) -> BVApp expr w
-  -- QuotSApp :: !(NatRepr w) -> !(expr w) -> !(expr w) -> BVApp expr w
-  -- RemUApp  :: !(NatRepr w) -> !(expr w) -> !(expr w) -> BVApp expr w
-  -- RemSApp  :: !(NatRepr w) -> !(expr w) -> !(expr w) -> BVApp expr w
-  -- NegateApp :: !(NatRepr w) -> !(expr w) -> BVApp expr w
-  -- AbsApp   :: !(NatRepr w) -> !(expr w) -> BVApp expr w
-  -- SignumApp :: !(NatRepr w) -> !(expr w) -> BVApp expr w
-
-  -- -- Comparisons
-  -- EqApp  :: !(expr w) -> !(expr w) -> BVApp expr 1
-  -- LtuApp :: !(expr w) -> !(expr w) -> BVApp expr 1
-  -- LtsApp :: !(expr w) -> !(expr w) -> BVApp expr 1
-
-  -- -- Width-changing
+bvToMacawRhs :: forall fmt s ids w . G.BVApp (BVValue ids) w
+             -> ITransM fmt s ids (AssignRhs RV32I (Value RV32I ids) (MT.BVType w))
+bvToMacawRhs (G.AndApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVAnd wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.OrApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVOr wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.XorApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVXor wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.NotApp wRepr e) = withPosNat wRepr $ EvalApp $ BVComplement wRepr (unBVValue e)
+bvToMacawRhs (G.SllApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVShl wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.SrlApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVShr wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.SraApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVSar wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.AddApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVAdd wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.SubApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVSub wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.MulApp wRepr e1 e2) = withPosNat wRepr $ EvalApp $ BVMul wRepr (unBVValue e1) (unBVValue e2)
+bvToMacawRhs (G.QuotUApp wRepr e1 e2) = withPosNat wRepr $ EvalArchFn (QuotU wRepr (unBVValue e1) (unBVValue e2)) (MT.BVTypeRepr wRepr)
+bvToMacawRhs (G.QuotSApp wRepr e1 e2) = withPosNat wRepr $ EvalArchFn (QuotS wRepr (unBVValue e1) (unBVValue e2)) (MT.BVTypeRepr wRepr)
+bvToMacawRhs (G.RemUApp wRepr e1 e2) = withPosNat wRepr $ EvalArchFn (RemU wRepr (unBVValue e1) (unBVValue e2)) (MT.BVTypeRepr wRepr)
+bvToMacawRhs (G.RemSApp wRepr e1 e2) = withPosNat wRepr $ EvalArchFn (RemS wRepr (unBVValue e1) (unBVValue e2)) (MT.BVTypeRepr wRepr)
+bvToMacawRhs (G.NegateApp wRepr e) = withPosNat wRepr $ EvalApp $ BVSub wRepr (MC.BVValue wRepr 0) (unBVValue e)
+bvToMacawRhs (G.AbsApp wRepr e) = withPosNatM wRepr $ do
+  t <- AssignedValue <$> (assign $ EvalApp $ BVSignedLe (MC.BVValue wRepr 0) (unBVValue e))
+  neg <- AssignedValue <$> (assign $ EvalApp $ BVSub wRepr (MC.BVValue wRepr 0) (unBVValue e))
+  return $ EvalApp $ Mux (MT.BVTypeRepr wRepr) t (unBVValue e) neg
+bvToMacawRhs (G.SignumApp wRepr e) = withPosNatM wRepr $ do
+  t <- AssignedValue <$> (assign $ EvalApp $ BVSignedLe (MC.BVValue wRepr 0) (unBVValue e))
+  return $ EvalApp $ Mux (MT.BVTypeRepr wRepr) t (MC.BVValue wRepr 0) (MC.BVValue wRepr 1)
+bvToMacawRhs (G.EqApp e1 e2) = do
+  t <- AssignedValue <$> (assign $ EvalApp $ Eq (unBVValue e1) (unBVValue e2))
+  return $ EvalApp $ Mux (MT.BVTypeRepr MT.n1) t (MC.BVValue MT.n1 1) (MC.BVValue MT.n1 0)
+bvToMacawRhs (G.LtuApp e1 e2) = withBVValuePosWidth (unBVValue e1) $ do
+  t <- AssignedValue <$> (assign $ EvalApp $ BVUnsignedLt (unBVValue e1) (unBVValue e2))
+  return $ EvalApp $ Mux (MT.BVTypeRepr MT.n1) t (MC.BVValue MT.n1 1) (MC.BVValue MT.n1 0)
+bvToMacawRhs (G.LtsApp e1 e2) = withBVValuePosWidth (unBVValue e1) $ do
+  t <- AssignedValue <$> (assign $ EvalApp $ BVSignedLt (unBVValue e1) (unBVValue e2))
+  return $ EvalApp $ Mux (MT.BVTypeRepr MT.n1) t (MC.BVValue MT.n1 1) (MC.BVValue MT.n1 0)
   -- ZExtApp    :: NatRepr w' -> !(expr w) -> BVApp expr w'
   -- SExtApp    :: NatRepr w' -> !(expr w) -> BVApp expr w'
   -- ExtractApp :: NatRepr w' -> Int -> !(expr w) -> BVApp expr w'
@@ -205,7 +216,7 @@ bvToMacawApp (G.MulApp wRepr e1 e2) = withPosNat wRepr $ BVMul wRepr (unBVValue 
 
   -- Other operations
   -- IteApp :: !(NatRepr w) -> !(expr 1) -> !(expr w) -> !(expr w) -> BVApp expr w
-bvToMacawApp _ = undefined
+bvToMacawRhs _ = undefined
 
 -- transBVApp :: G.BVApp (BVValue ids) w
 --            -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))
