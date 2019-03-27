@@ -8,7 +8,6 @@
 
 module Data.Macaw.RV32I.Translate
   ( initialBlockRegs
-  , readInstruction
   , translateBlock
   ) where
 

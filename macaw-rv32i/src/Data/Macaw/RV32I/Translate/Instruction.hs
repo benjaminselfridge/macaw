@@ -8,6 +8,7 @@
 
 module Data.Macaw.RV32I.Translate.Instruction
   ( stmtsForInstruction
+  , ITransError(..)
   , ITransState(..)
   , ITransResult(..)
   ) where
@@ -211,7 +212,7 @@ transStmt (G.AssignStmt (G.MemApp bytesRepr addrE) e) = do
 transStmt (G.AssignStmt locApp _) = throwError $ UnsupportedLocError (Some locApp)
 transStmt _ = throwError $ undefined
 
--- | Given an 'InstExpr', translate it to a macaw 'Value' by traversing the
+-- | Given an 'G.InstExpr', translate it to a macaw 'Value' by traversing the
 -- expression, building up a list of statements along the way.
 transInstExpr :: G.InstExpr fmt G.RV32I w
               -> ITransM fmt s ids (Value RV32I ids (MT.BVType w))

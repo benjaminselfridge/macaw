@@ -13,10 +13,11 @@ module Data.Macaw.RV32I
   , RV32I
   ) where
 
-import Data.Macaw.Architecture.Info as MI
-import Data.Macaw.Memory as MM
+import qualified Data.Macaw.Architecture.Info as MI
+import qualified Data.Macaw.Memory as MM
 
 import Data.Macaw.RV32I.Arch
+import Data.Macaw.RV32I.Eval
 import Data.Macaw.RV32I.Translate
 
 rv32i_linux_info :: MI.ArchitectureInfo RV32I
@@ -26,10 +27,10 @@ rv32i_linux_info =
                       , MI.archEndianness = MM.LittleEndian
                       , MI.mkInitialRegsForBlock = initialBlockRegs
                       , MI.disassembleFn = translateBlock
-                      , MI.mkInitialAbsState = undefined
-                      , MI.absEvalArchFn = undefined
-                      , MI.absEvalArchStmt = undefined
-                      , MI.postCallAbsState = undefined
+                      , MI.mkInitialAbsState = mkInitialAbsState
+                      , MI.absEvalArchFn = absEvalArchFn
+                      , MI.absEvalArchStmt = absEvalArchStmt
+                      , MI.postCallAbsState = postCallAbsState
                       , MI.identifyCall = undefined
                       , MI.checkForReturnAddr = undefined
                       , MI.identifyReturn = undefined

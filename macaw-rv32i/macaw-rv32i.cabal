@@ -19,6 +19,7 @@ extra-source-files:  CHANGELOG.md
 library
   exposed-modules:   Data.Macaw.RV32I,
                      Data.Macaw.RV32I.Arch,
+                     Data.Macaw.RV32I.Eval,
                      Data.Macaw.RV32I.Translate,
                      Data.Macaw.RV32I.Translate.Instruction,
                      Data.Macaw.RV32I.RV32IReg
