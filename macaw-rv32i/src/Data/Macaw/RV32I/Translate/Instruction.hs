@@ -153,7 +153,7 @@ setCurGPR rid regVal = do
   put $ ITransState (currentRegState & boundValue (RV32I_GPR rid) .~ regVal)
 
 addStmt :: Stmt RV32I ids -> ITransM fmt s ids ()
-addStmt stmt = tell $ Seq.singleton stmt
+addStmt = tell . Seq.singleton
 
 assign :: AssignRhs RV32I (Value RV32I ids) tp -> ITransM fmt s ids (Assignment RV32I ids tp)
 assign rhs = do
