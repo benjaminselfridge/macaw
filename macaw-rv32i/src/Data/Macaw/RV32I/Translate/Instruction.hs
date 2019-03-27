@@ -40,9 +40,13 @@ data ITransResult fmt ids = ITransError (ITransError fmt) (ITransState ids)
 
 -- | Translate an instruction into a list of macaw statements.
 stmtsForInstruction :: NonceGenerator (ST s) ids
+                    -- ^ A 'NonceGenerator' for generating 'AssignId's
                     -> G.Instruction G.RV32I fmt
+                    -- ^ RISC-V instruction we are generating semantics for
                     -> RegState (ArchReg RV32I) (Value RV32I ids)
+                    -- ^ Register state at the start of the instruction execution
                     -> ST s (ITransResult fmt ids)
+                    -- ^ Register state after instruction execution
 stmtsForInstruction ng inst rs = do
   (e, st, stmts) <- runITransM (ITransEnv ng inst rs) (ITransState rs) transInstruction
   case e of
