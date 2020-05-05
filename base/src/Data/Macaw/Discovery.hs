@@ -539,16 +539,16 @@ extractJumpTableSlices jmpBounds base stride ixVal tp = do
                       ++ show (ppValueAssignments ixVal) ++ "\n"
                       ++ show (pretty jmpBounds)
       Just bnd -> do
-        let cnt = toInteger (bnd+1)
+        let cnt = bnd+1
         -- Check array actually fits in memory.
-        when (cnt * toInteger stride > segoffBytesLeft base) $ do
+        when (cnt * fromIntegral stride > fromIntegral (segoffBytesLeft base)) $ do
           fail "Size is too large."
         pure cnt
 
   -- Get memory contents after base
   Right contents <- pure $ segoffContentsAfter base
   -- Break up contents into a list of slices each with size stide
-  Right (strideSlices,_) <- pure $ sliceMemContents (fromIntegral stride) cnt contents
+  Right (strideSlices,_) <- pure $ sliceMemContents (fromIntegral stride) (toInteger cnt) contents
   -- Get memory slices
   Right slices <-
     pure $ traverse (\s -> fst <$> splitMemChunks s (fromIntegral (memReprBytes tp)))
@@ -1460,7 +1460,7 @@ addBlock src finfo pr = do
       maxSize =
         case Map.lookupGT src prev_block_map of
           Just (next,_) | Just o <- diffSegmentOff next src -> fromInteger o
-          _ -> fromInteger (segoffBytesLeft src)
+          _ -> fromIntegral (segoffBytesLeft src)
   (b0, sz) <- liftST $ disassembleFn ainfo nonceGen src initRegs maxSize
   -- Rewrite returned blocks to simplify expressions
 #ifdef USE_REWRITER

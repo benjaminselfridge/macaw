@@ -848,7 +848,8 @@ relocTargetBytes tp = fromIntegral $ (Elf.relocTargetBits tp + 7) `shiftR` 3
 type RelocMap w = Map (MemWord w) (RelocEntry (MemLoader w) w)
 
 -- | Add a relocation entry to the map.
-addRelocEntry :: RelocMap w
+addRelocEntry :: MemWidth w
+              => RelocMap w
               -> MemWord w
               -> RelocEntry (MemLoader w) w
               -> MemLoader w (RelocMap w)
@@ -856,7 +857,7 @@ addRelocEntry m addr e =
   case Map.insertLookupWithKey (\_k _new old -> old) addr e m of
     (Nothing, m') -> pure m'
     (Just _, _) -> do
-      addWarning $ MultipleRelocationsAtAddr (memWordValue addr)
+      addWarning $ MultipleRelocationsAtAddr (fromIntegral addr)
       pure m
 
 -- | Add a relocation entry to the map.

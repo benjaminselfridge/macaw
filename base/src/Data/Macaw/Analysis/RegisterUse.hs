@@ -1014,13 +1014,14 @@ data BlockUsageSummary (arch :: Type) ids = BUS
   , blockCallFunType :: !(Maybe (ArchFunType arch))
   }
 
-initBlockUsageSummary :: BlockStartConstraints arch
+initBlockUsageSummary :: MemWidth (ArchAddrWidth arch)
+                      => BlockStartConstraints arch
                       -> InferState arch ids
                       -> BlockUsageSummary arch ids
 initBlockUsageSummary cns s =
   let a = reverse (sisMemAccessStack s)
    in BUS { blockUsageStartConstraints = cns
-          , blockCurOff            = zeroMemWord
+          , blockCurOff            = zeroMemWord memWidthNatRepr
           , blockMemAccesses       = a
           , blockFinalStack        = sisStack s
           , _blockExecDemands      = emptyDeps
