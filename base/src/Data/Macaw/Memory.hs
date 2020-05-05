@@ -382,7 +382,9 @@ memWordSigned :: MemWidth w => MemWord w -> Integer
 memWordSigned = memWordToSigned
 
 addrSize :: MemWidth w => p w -> Int
-addrSize p = widthVal (addrWidthNatRepr (addrWidthRepr p))
+addrSize p = case addrWidthRepr p of
+  Addr32 -> 4
+  Addr64 -> 8
 
 -- | Returns number of bits in address.
 addrBitSize :: MemWidth w => p w -> Int
