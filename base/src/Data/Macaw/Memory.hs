@@ -152,6 +152,7 @@ module Data.Macaw.Memory
 import           Control.Monad
 import           Data.BinarySymbols
 import           Data.Bits
+import qualified Data.BitVector.Sized as BV
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
 import           Data.Int (Int32, Int64)
@@ -168,6 +169,7 @@ import           Text.PrettyPrint.ANSI.Leijen hiding ((<$>), (<>))
 
 import           Data.Parameterized.Classes
 import           Data.Parameterized.NatRepr
+import           Data.Parameterized.Pair
 
 import qualified Data.Macaw.Memory.Permissions as Perm
 
@@ -289,6 +291,16 @@ bsWord64 :: Endianness -> BS.ByteString -> Word64
 bsWord64 BigEndian    = bsWord64be
 bsWord64 LittleEndian = bsWord64le
 
+bsBV :: NatRepr w -> Endianness -> BS.ByteString -> Maybe (BV.BV w)
+bsBV w BigEndian bs = do
+  Pair w' bv <- return $ BV.bytesBE (BS.unpack bs)
+  Refl <- w `testEquality` w'
+  return bv
+bsBV w LittleEndian bs = do
+  Pair w' bv <- return $ BV.bytesLE (BS.unpack bs)
+  Refl <- w `testEquality` w'
+  return bv
+
 ------------------------------------------------------------------------
 -- MemWord
 
@@ -296,23 +308,21 @@ bsWord64 LittleEndian = bsWord64le
 --
 -- Operations on it require the `MemWidth` constraint to be satisfied, so in practice
 -- this only works for 32 and 64-bit values.
-newtype MemWord (w :: Nat) = MemWord { memWordValue :: Word64 }
+newtype MemWord (w :: Nat) = MemWord { memWordValue :: BV.BV w }
 
 -- | Equal to 0
-zeroMemWord :: MemWord w
-zeroMemWord = MemWord 0
+zeroMemWord :: NatRepr w -> MemWord w
+zeroMemWord w = MemWord (BV.zero w)
 
 -- | Convert word64 @x@ into mem word @x mod 2^w-1@.
-memWord :: forall w . MemWidth w => Word64 -> MemWord w
-memWord x = MemWord (x .&. addrWidthMask p)
-  where p :: Proxy w
-        p = Proxy
+memWord :: forall w . MemWidth w => BV.BV w -> MemWord w
+memWord x = MemWord x
 
 instance Hashable (MemWord w) where
   hashWithSalt s (MemWord w) = s `hashWithSalt` w
 
 instance Show (MemWord w) where
-  showsPrec _ (MemWord w) = showString "0x" . showHex w
+  showsPrec _ (MemWord (BV.BV w)) = showString "0x" . showHex w
 
 instance Pretty (MemWord w) where
   pretty = text . show
@@ -334,16 +344,16 @@ class (1 <= w) => MemWidth w where
   -- The argument is ignored.
   addrWidthRepr :: p w -> AddrWidthRepr w
 
-  -- | Returns number of bytes in addr.
-  --
-  -- The argument is not evaluated.
-  addrSize :: p w -> Int
+  -- -- | Returns number of bytes in addr.
+  -- --
+  -- -- The argument is not evaluated.
+  -- addrSize :: p w -> Int
 
-  -- | @addrWidthMask w@ returns @2^(8 * addrSize w) - 1@.
-  addrWidthMask :: p w -> Word64
+  -- -- | @addrWidthMask w@ returns @2^(8 * addrSize w) - 1@.
+  -- addrWidthMask :: p w -> BV.BV w
 
-  -- | Rotates the value by the given index.
-  addrRotate :: MemWord w -> Int -> MemWord w
+  -- -- | Rotates the value by the given index.
+  -- addrRotate :: MemWord w -> Int -> MemWord w
 
 memWidthNatRepr :: MemWidth w => NatRepr w
 memWidthNatRepr = addrWidthNatRepr (addrWidthRepr memWidthNatRepr)
@@ -352,23 +362,15 @@ memWidthNatRepr = addrWidthNatRepr (addrWidthRepr memWidthNatRepr)
 --
 -- This returns nothing if the bytestring is too short.
 addrRead :: forall w . MemWidth w => Endianness -> BS.ByteString -> Maybe (MemWord w)
-addrRead e s =
-  case addrWidthRepr (Proxy :: Proxy w) of
-    Addr32 | BS.length s < 4 -> Nothing
-           | otherwise -> Just $ MemWord $ fromIntegral $ bsWord32 e s
-    Addr64 | BS.length s < 8 -> Nothing
-           | otherwise -> Just $ MemWord $ bsWord64 e s
-
+addrRead e s = MemWord <$> bsBV memWidthNatRepr e s
 
 -- | Return the value represented by the MemWord as an unsigned integer.
 memWordToUnsigned  :: MemWord w -> Integer
-memWordToUnsigned = fromIntegral . memWordValue
+memWordToUnsigned = BV.asUnsigned . memWordValue
 
 -- | Treat the word as a signed integer.
 memWordToSigned :: MemWidth w => MemWord w -> Integer
-memWordToSigned w = if i >= bound then i-2*bound else i
-  where i = memWordInteger w
-        bound = 2^(addrBitSize w-1)
+memWordToSigned = BV.asSigned memWidthNatRepr . memWordValue
 
 -- | Treat the word as an integer.
 memWordInteger :: MemWord w -> Integer
@@ -379,62 +381,61 @@ memWordInteger = memWordToUnsigned
 memWordSigned :: MemWidth w => MemWord w -> Integer
 memWordSigned = memWordToSigned
 
+addrSize :: MemWidth w => p w -> Int
+addrSize p = widthVal (addrWidthNatRepr (addrWidthRepr p))
+
 -- | Returns number of bits in address.
 addrBitSize :: MemWidth w => p w -> Int
 addrBitSize w = 8 * addrSize w
 
 instance MemWidth w => Num (MemWord w) where
-  MemWord x + MemWord y = memWord $ x + y
-  MemWord x - MemWord y = memWord $ x - y
-  MemWord x * MemWord y = memWord $ x * y
+  MemWord x + MemWord y = memWord $ BV.add memWidthNatRepr x y
+  MemWord x - MemWord y = memWord $ BV.sub memWidthNatRepr x y
+  MemWord x * MemWord y = memWord $ BV.mul memWidthNatRepr x y
   abs = id
-  fromInteger = memWord . fromInteger
-  negate (MemWord x) = memWord (negate x)
-  signum (MemWord x) = memWord (signum x)
+  fromInteger = memWord . BV.mkBV memWidthNatRepr
+  negate (MemWord x) = memWord (BV.negate memWidthNatRepr x)
+  signum (MemWord (BV.BV 0)) = MemWord $ BV.zero memWidthNatRepr
+  signum _                   = MemWord $ BV.one memWidthNatRepr
 
 instance MemWidth w => Bits (MemWord w) where
 
-  MemWord x .&. MemWord y = memWord (x .&. y)
-  MemWord x .|. MemWord y = memWord (x .|. y)
-  MemWord x `xor` MemWord y = memWord (x `xor` y)
-  complement (MemWord x) = memWord (complement x)
-  MemWord x `shift` i = memWord (x `shift` i)
-  x `rotate` i = addrRotate x i
+  MemWord x .&. MemWord y = memWord (BV.and x y)
+  MemWord x .|. MemWord y = memWord (BV.or x y)
+  MemWord x `xor` MemWord y = memWord (BV.xor x y)
+  complement (MemWord x) = memWord (BV.complement memWidthNatRepr x)
+  MemWord x `shiftL` i = memWord (BV.shl memWidthNatRepr x (fromIntegral i))
+  MemWord x `shiftR` i = memWord (BV.lshr x (fromIntegral i))
+  MemWord x `rotateL` i = memWord (BV.rotateL memWidthNatRepr x (fromIntegral i))
+  MemWord x `rotateR` i = memWord (BV.rotateR memWidthNatRepr x (fromIntegral i))
   bitSize = addrBitSize
   bitSizeMaybe x = Just (addrBitSize x)
   isSigned _ = False
-  MemWord x `testBit` i = x `testBit` i
-  bit i = memWord (bit i)
-  popCount (MemWord x) = popCount x
+  MemWord x `testBit` i = BV.testBit' (fromIntegral i) x
+  bit i = memWord (BV.bit' memWidthNatRepr (fromIntegral i))
+  popCount (MemWord x) = fromIntegral (BV.asUnsigned (BV.popCount x))
 
 instance MemWidth w => Enum (MemWord w) where
-  toEnum = memWord . fromIntegral
-  fromEnum (MemWord x) = fromIntegral x
+  toEnum = memWord . BV.mkBV memWidthNatRepr . toInteger
+  fromEnum (MemWord x) = fromIntegral (BV.asUnsigned x)
 
 instance MemWidth w => Real (MemWord w) where
-  toRational (MemWord x) = toRational x
+  toRational (MemWord x) = toRational (BV.asUnsigned x)
 
 instance MemWidth w => Integral (MemWord w) where
   MemWord x `quotRem` MemWord y = (MemWord q, MemWord r)
-    where (q,r) = x `quotRem` y
-  toInteger (MemWord x) = toInteger x
+    where (q,r) = (BV.uquot x y, BV.urem x y)
+  toInteger (MemWord x) = BV.asUnsigned x
 
 instance MemWidth w => Bounded (MemWord w) where
   minBound = 0
-  maxBound = MemWord (addrWidthMask (Proxy :: Proxy w))
+  maxBound = MemWord (BV.maxUnsigned memWidthNatRepr)
 
 instance MemWidth 32 where
   addrWidthRepr _ = Addr32
-  addrWidthMask _ = 0xffffffff
-  addrRotate (MemWord w) i =
-    MemWord (fromIntegral ((fromIntegral w :: Word32) `rotate` i))
-  addrSize _ = 4
 
 instance MemWidth 64 where
   addrWidthRepr _ = Addr64
-  addrWidthMask _ = 0xffffffffffffffff
-  addrRotate (MemWord w) i = MemWord (w `rotate` i)
-  addrSize _ = 8
 
 -- | Number of bytes in an address
 addrWidthClass :: AddrWidthRepr w -> (MemWidth w => a) -> a
@@ -631,16 +632,16 @@ instance Show (MemChunk w) where
 -- | This represents the memory contents in a segment.
 newtype SegmentContents w = SegmentContents { segContentsMap :: Map.Map (MemWord w) (MemChunk w) }
 
-chunkSize :: forall w . MemWidth w => MemChunk w -> Word64
+chunkSize :: forall w . MemWidth w => MemChunk w -> MemWord w
 chunkSize (ByteRegion bs) = fromIntegral (BS.length bs)
 chunkSize (RelocationRegion r) = fromIntegral (relocationSize r)
-chunkSize (BSSRegion sz)  = memWordValue sz
+chunkSize (BSSRegion sz)  = sz
 
 contentsSize :: MemWidth w => SegmentContents w -> MemWord w
 contentsSize (SegmentContents m) =
   case Map.maxViewWithKey m of
     Nothing -> 0
-    Just ((start, c),_) -> memWord (memWordValue start + chunkSize c)
+    Just ((start, c),_) -> start + chunkSize c
 
 -- | Deconstruct a 'SegmentContents' into its constituent ranges
 contentsRanges :: SegmentContents w -> [(MemWord w, MemChunk w)]
@@ -1098,12 +1099,13 @@ asAbsoluteAddr :: MemWidth w => MemAddr w -> Maybe (MemWord w)
 asAbsoluteAddr (MemAddr i w) = if i == 0 then Just w else Nothing
 
 -- | Clear the least significant bit of an address.
-clearAddrLeastBit :: MemAddr w -> MemAddr w
-clearAddrLeastBit (MemAddr i (MemWord off)) = MemAddr i (MemWord (off .&. complement 1))
+clearAddrLeastBit :: MemWidth w => MemAddr w -> MemAddr w
+clearAddrLeastBit (MemAddr i (MemWord off)) =
+  MemAddr i (MemWord (BV.xor off (BV.one memWidthNatRepr)))
 
 -- | Return True if least-significant bit in addr is set.
 addrLeastBit :: MemAddr w -> Bool
-addrLeastBit (MemAddr _ (MemWord off)) = off `testBit` 0
+addrLeastBit (MemAddr _ (MemWord off)) = BV.testBit' 0 off
 
 -- | Increment an address by a fixed amount.
 incAddr :: MemWidth w => Integer -> MemAddr w -> MemAddr w
@@ -1120,10 +1122,10 @@ diffAddr (MemAddr xb xoff) (MemAddr yb yoff)
 -- MemSegmentOff operations
 
 -- | Return the number of bytes in the segment after this address.
-segoffBytesLeft :: MemWidth w => MemSegmentOff w -> Integer
+segoffBytesLeft :: MemWidth w => MemSegmentOff w -> MemWord w
 segoffBytesLeft segOff = sz - off
-  where sz = toInteger (segmentSize (segoffSegment segOff))
-        off = toInteger (segoffOffset segOff)
+  where sz = segmentSize (segoffSegment segOff)
+        off = segoffOffset segOff
 
 -- | Make a segment offset pair after ensuring the offset is valid
 resolveSegmentOff :: MemWidth w => MemSegment w -> MemWord w -> Maybe (MemSegmentOff w)
@@ -1144,11 +1146,11 @@ resolveAddr = resolveRegionOff
 {-# DEPRECATED resolveAddr "Use resolveRegionOff" #-}
 
 -- | Return the address of a segment offset.
-segoffAddr :: MemSegmentOff w -> MemAddr w
+segoffAddr :: MemWidth w => MemSegmentOff w -> MemAddr w
 segoffAddr (MemSegmentOff seg off) =
   MemAddr { addrBase = segmentBase seg
             -- Segment off
-          , addrOffset = MemWord $ memWordValue (segmentOffset seg) + memWordValue off
+          , addrOffset = MemWord $ BV.add memWidthNatRepr (memWordValue (segmentOffset seg)) (memWordValue off)
           }
 
 -- | Return the segment associated with the given address if well-defined.
@@ -1162,7 +1164,7 @@ segoffAsAbsoluteAddr mseg = do
    in if segmentBase seg == 0 then
         -- We do not need to normalize, because the overflow was checked when the segment offset
         -- was created.
-        Just $! MemWord (memWordValue (segmentOffset seg) + memWordValue (segoffOffset mseg))
+        Just $! MemWord (BV.add memWidthNatRepr (memWordValue (segmentOffset seg)) (memWordValue (segoffOffset mseg)))
        else
         Nothing
 
@@ -1251,7 +1253,7 @@ msegOffset = segoffOffset
 
 -- | Return the number of bytes in the segment after this address.
 msegByteCountAfter :: MemWidth w => MemSegmentOff w -> Integer
-msegByteCountAfter = segoffBytesLeft
+msegByteCountAfter = toInteger . segoffBytesLeft
 {-# DEPRECATED msegByteCountAfter "Use segoffBytesLeft" #-}
 
 -- | Convert the segment offset to an address.
@@ -1284,7 +1286,7 @@ data MemoryError w
      -- ^ We unexpectedly encountered a BSS segment/section.
    | InvalidAddr !(MemAddr w)
      -- ^ The data at the given address did not refer to a valid memory location.
-   | InvalidRead !(MemSegmentOff w) !Word64
+   | InvalidRead !(MemSegmentOff w) !(MemWord w)
      -- ^ Can't read the given number of bytes from the offset as that is outside
      -- allocated memory.
 
@@ -1500,15 +1502,16 @@ addrContentsAfter mem addr = do
     segoffContentsAfter =<< resolveMemAddr mem addr
 
 -- | Attempt to read a bytestring of the given length
-readByteString' :: RegionIndex
+readByteString' :: MemWidth w
+                => RegionIndex
                    -- ^ Region we are in.
                 -> BS.ByteString
                    -- ^ Bytestring read so far.
-                -> Word64
+                -> MemWord w
                    -- ^ Bytes read so far.
                 -> [MemChunk w]
                   -- ^ Remaining memory chunks to read from.
-                -> Word64
+                -> MemWord w
                    -- ^ Total remaining number of bytes to read.
                 -> Either (MemoryError w) BS.ByteString
 readByteString' _ prev _ _ 0 =
@@ -1523,11 +1526,10 @@ readByteString' reg prev off (ByteRegion bs:rest) cnt = do
     let cnt' = cnt - sz
     seq cnt' $ seq off' $ readByteString' reg (prev <> bs) off' rest cnt'
 readByteString' reg _ off (RelocationRegion r:_) _ = do
-  let addr = MemAddr { addrBase = reg, addrOffset = MemWord off }
+  let addr = MemAddr { addrBase = reg, addrOffset = off }
   Left $! UnexpectedRelocation addr r
 readByteString' reg prev off (BSSRegion sz0:rest) cnt = do
-  let sz :: Word64
-      sz = memWordValue sz0
+  let sz = sz0
   if cnt <= sz then do
     when (cnt > fromIntegral (maxBound :: Int)) $ do
       error $ "Illegal size " ++ show cnt
@@ -1537,22 +1539,22 @@ readByteString' reg prev off (BSSRegion sz0:rest) cnt = do
       error $ "Illegal size " ++ show cnt
     let bs = BS.replicate (fromIntegral sz) 0
     let off' = off + sz
-    let cnt' = cnt - sz
+    let cnt' = cnt + sz
     seq cnt' $ seq off' $ readByteString' reg (prev <> bs) off' rest cnt'
 
 -- | Attempt to read a bytestring of the given length
 readByteString :: Memory w
                -> MemAddr w
-               -> Word64 -- ^ Number of bytes to read
+               -> MemWord w -- ^ Number of bytes to read
                -> Either (MemoryError w) BS.ByteString
 readByteString mem addr cnt = addrWidthClass (memAddrWidth mem) $ do
   segOff <- resolveMemAddr mem addr
   -- Check read is in range.
-  when (toInteger cnt > segoffBytesLeft segOff) $ do
+  when (segoffBytesLeft segOff < cnt) $ do
     Left $! InvalidRead segOff cnt
   -- Get contents after segment
   l      <- segoffContentsAfter segOff
-  readByteString' (addrBase addr) BS.empty (memWordValue (addrOffset addr)) l cnt
+  readByteString' (addrBase addr) BS.empty (addrOffset addr) l cnt
 
 -- | Read an address from the value in the segment or report a memory
 -- error.
@@ -1585,31 +1587,31 @@ readSegmentOff mem end addr = addrWidthClass (memAddrWidth mem) $ do
     Nothing -> error $ "readSegmentOff internal error: readByteString result too short."
 
 -- | Read a single byte.
-readWord8 :: Memory w -> MemAddr w -> Either (MemoryError w) Word8
+readWord8 :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word8
 readWord8 mem addr = bsWord8 <$> readByteString mem addr 1
 
 -- | Read a big endian word16
-readWord16be :: Memory w -> MemAddr w -> Either (MemoryError w) Word16
+readWord16be :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word16
 readWord16be mem addr = bsWord16be <$> readByteString mem addr 2
 
 -- | Read a little endian word16
-readWord16le :: Memory w -> MemAddr w -> Either (MemoryError w) Word16
+readWord16le :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word16
 readWord16le mem addr = bsWord16le <$> readByteString mem addr 2
 
 -- | Read a big endian word32
-readWord32be :: Memory w -> MemAddr w -> Either (MemoryError w) Word32
+readWord32be :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word32
 readWord32be mem addr = bsWord32be <$> readByteString mem addr 4
 
 -- | Read a little endian word32
-readWord32le :: Memory w -> MemAddr w -> Either (MemoryError w) Word32
+readWord32le :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word32
 readWord32le mem addr = bsWord32le <$> readByteString mem addr 4
 
 -- | Read a big endian word64
-readWord64be :: Memory w -> MemAddr w -> Either (MemoryError w) Word64
+readWord64be :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word64
 readWord64be mem addr = bsWord64be <$> readByteString mem addr 8
 
 -- | Read a little endian word64
-readWord64le :: Memory w -> MemAddr w -> Either (MemoryError w) Word64
+readWord64le :: MemWidth w => Memory w -> MemAddr w -> Either (MemoryError w) Word64
 readWord64le mem addr = bsWord64le <$> readByteString mem addr 8
 
 data NullTermString w
@@ -1625,7 +1627,7 @@ readNullTermString :: MemWidth w
 readNullTermString addr = do
   let seg = segoffSegment addr
   let reg = segmentBase seg
-  let off = memWordValue (segmentOffset seg) + memWordValue (segoffOffset addr)
+  let off = segmentOffset seg + segoffOffset addr
   case segoffContentsAfter addr of
     Left e -> NullTermMemoryError e
     Right [] -> NoNullTerm
@@ -1637,14 +1639,14 @@ readNullTermString addr = do
           ByteRegion _:_ -> error "Misformed memory chunks"
           RelocationRegion _r:_ ->
             let off' = off + fromIntegral (BS.length bs)
-                relAddr = MemAddr { addrBase = reg, addrOffset = MemWord off' }
+                relAddr = MemAddr { addrBase = reg, addrOffset = off' }
              in RelocationBeforeNull relAddr
           BSSRegion _:_ ->
             NullTermString bs
       else
         NullTermString bs'
     Right (RelocationRegion _r:_) ->
-      let relAddr = MemAddr { addrBase = reg, addrOffset = MemWord off }
+      let relAddr = MemAddr { addrBase = reg, addrOffset = off }
        in RelocationBeforeNull relAddr
     Right (BSSRegion _:_) ->
       NullTermString BS.empty
