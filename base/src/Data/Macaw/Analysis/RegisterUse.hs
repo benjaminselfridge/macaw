@@ -1021,7 +1021,7 @@ initBlockUsageSummary :: MemWidth (ArchAddrWidth arch)
 initBlockUsageSummary cns s =
   let a = reverse (sisMemAccessStack s)
    in BUS { blockUsageStartConstraints = cns
-          , blockCurOff            = zeroMemWord memWidthNatRepr
+          , blockCurOff            = zeroMemWord
           , blockMemAccesses       = a
           , blockFinalStack        = sisStack s
           , _blockExecDemands      = emptyDeps

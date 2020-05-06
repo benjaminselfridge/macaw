@@ -311,8 +311,8 @@ bsBV w LittleEndian bs = do
 newtype MemWord (w :: Nat) = MemWord { memWordValue :: BV.BV w }
 
 -- | Equal to 0
-zeroMemWord :: NatRepr w -> MemWord w
-zeroMemWord w = MemWord (BV.zero w)
+zeroMemWord :: MemWidth w => MemWord w
+zeroMemWord = MemWord (BV.zero memWidthNatRepr)
 
 -- | Convert word64 @x@ into mem word @x mod 2^w-1@.
 memWord :: forall w . MemWidth w => BV.BV w -> MemWord w
